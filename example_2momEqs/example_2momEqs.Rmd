@@ -1,0 +1,411 @@
+---
+title: "2-moment equation"
+output: html_document
+date: '2022-07-27'
+---
+
+```{r initial_setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+SAMID = 'preVolcker_z2_EfiTest'
+knitr::opts_chunk$set(echo = TRUE) # Whether to display the source code in the output document. 
+PATHROOT <- 'C:/Users/22457561/OneDrive/UWA PhD/Fiscal_Monetary_Interaction/'
+tryCatch({setwd(PATHROOT)},
+         error = function(cond) { 
+           PATHROOT <<- 'C:/Users/a1230166/OneDrive/UWA PhD/Fiscal_Monetary_Interaction/'
+           setwd(PATHROOT)})
+OUTFOLDER <- 'Results/'
+
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(future)
+library(furrr)
+library(purrr)
+library(sandwich) # HAC variance estimator
+library(MTS)
+library(DT)
+library(plotly)
+library(profvis)
+library(tictoc)
+# Plotting
+library(gridExtra) # tableGrob
+library(latex2exp) # TeX
+source(str_c(PATHROOT, 'Codes/FunsMisc.R'))
+
+```
+
+## The model
+2 indepenent AR processes:
+$$
+\begin{align}
+y_{1, t} &= \alpha_{1,1} + \rho_{1,1} y_{1, t-1} + \rho_{1,2} y_{1, t-2} + \rho_{1,3} y_{1, t-3} + \varepsilon_1 \\ 
+y_{2, t} &= \alpha_{2,1} + \rho_{2,1} y_{1, t-1} + \rho_{2,2} y_{1, t-2} +  \varepsilon_2 \\ 
+\end{align}
+$$
+## Simulation
+```{r}
+sim_AR3 <- function(alpha, rho1, rho2, rho3, T) {
+  epsilon_ <- rnorm(T)
+  y_ <- rep(NA, times=T)
+  y_[1] <- rho1*epsilon_[1]
+  y_[2] <- rho2*epsilon_[2]
+  y_[3] <- rho3*epsilon_[3]
+  
+  for (t in 4:T)
+  {
+    y_[t] <- alpha + rho1 * y_[t-1] + rho2 * y_[t-2] + rho3 * y_[t-3] + epsilon_[t]  
+  }
+  
+  y_
+  
+}
+set.seed(12345)
+
+alpha1 = 0
+alpha2 = 0
+rho11 = 0.15
+rho12 = -0.10
+rho13 = 0.3
+rho21 = -0.45
+rho22= 0.15
+y1 = sim_AR3(alpha1, rho11, rho12, rho13, 500)
+y2 = sim_AR3(alpha2, rho21, rho22, 0, 500)
+
+```
+
+Simuated equations are:
+
+$$
+\begin{align}
+y_{1, t} &= `r alpha1 ` + `r rho11` y_{1, t-1} + `r rho12` y_{1, t-2} + `r rho13` y_{1, t-3} + \varepsilon_1 \\ 
+y_{2, t} &= `r alpha2` + `r rho21` y_{1, t-1} + `r rho22` y_{1, t-2} +  \varepsilon_2 \\ 
+\end{align}
+$$
+
+## ESTIMATION
+
+### GMM minimand
+$$
+\begin{align}
+S_{T}(\theta) &= 
+\underbrace{ \mathbf{f}^{\prime}}_{(1 \times K1+K2)} 
+\; W \;
+\underbrace{\mathbf{f}}_{(K1+K2 \times 1)} \\
+S_{T}(\theta) &= \left( \mathbb{E}_{t} 
+\begin{bmatrix}
+\mathbf{z}_{1, t}^{\prime} u_{1, t} \\
+\mathbf{z}_{2, t}^{\prime} u_{2, t} \\
+\end{bmatrix} \right)^{\prime}
+\; W \;
+\mathbb{E}_{t} 
+\begin{bmatrix}
+\mathbf{z}_{1, t}^{\prime} u_{1, t} \\
+\mathbf{z}_{2, t}^{\prime} u_{2, t} \\
+\end{bmatrix} \\
+\end{align}
+$$
+
+## Equations
+
+### Residuals
+
+$$
+\begin{align}
+u_{1, t} &= y_{1, t} - \alpha_{1,1} + \rho_{1,1} y_{1, t-1} + \rho_{1,2} y_{1, t-2} + \rho_{1,3} y_{1, t-3} \\ 
+u_{2, t} &= y_{2, t} - \alpha_{2,1} + \rho_{2,1} y_{1, t-1} + \rho_{2,2} y_{1, t-2}  \\ 
+\end{align}
+$$
+These can be conveniently rewritten in matrix form as
+$$
+U = Y \mathbf{b}(\theta) - X C
+$$
+with
+$$
+\underbrace{U}_{(2T \times 1)} \,=\,
+\underbrace{\begin{bmatrix}
+Y_1   &   0 \\
+0   &   Y_2   \\
+\end{bmatrix}}_{(2T \times )}
+\underbrace{
+\begin{bmatrix}
+\mathbf{b}_1 \\
+\mathbf{b}_2
+\end{bmatrix}}_{( \times )}
+\: - \:
+\begin{bmatrix}
+1   &   0 \\
+1   &   0   \\
+\vdots    &   \vdots \\
+0   &   1   \\
+0   &   1   \\
+\end{bmatrix}_{(2T \times 2)}
+\begin{bmatrix}
+c_1 \\
+c_2
+\end{bmatrix}
+$$
+with
+
+$$
+\begin{align}
+Y_{1} =
+\begin{bmatrix}
+y_{1,4} & y_{1,3} & y_{1,2} & y_{1,1} \\
+y_{1,5} & y_{1,4} & y_{1,3} & y_{1,2} \\
+\vdots & \vdots & \vdots & \vdots \\
+y_{1,T} & y_{1,T-1} & y_{1,T-2} & y_{1,T-3} \\
+\end{bmatrix}
+\:,
+\mathbf{b}_{1}(\theta_{1}) = 
+\begin{bmatrix}
+1 \\
+\rho_{11} \\
+\rho_{12} \\
+\rho_{13} 
+\end{bmatrix}
+\:,
+X_{1} = 
+\begin{bmatrix}
+1 \\
+1 \\
+\vdots \\
+1
+\end{bmatrix}_{(T \times 1)}
+\end{align}
+$$
+
+### The moment conditions
+
+$$
+\begin{align}
+\mathbf{z}_{1, t} &= \left[ y_{1, t-1}, y_{1, t-2}, y_{1, t-3} \right] \\
+\mathbf{z}_{2, t} &= \left[ y_{2, t-1}, y_{2, t-2} \right] 
+\end{align}
+$$
+
+$$
+\begin{align}
+\mathbf{f} =
+\mathbb{E}_{t} 
+\begin{bmatrix}
+\mathbf{z}_{1, t}^{\prime} u_{1, t} \\
+\mathbf{z}_{2, t}^{\prime} u_{2, t} \\
+\end{bmatrix}
+&=&
+\begin{bmatrix}
+  \begin{bmatrix} 
+  y_{1, t-1} & y_{1, t-2} &  y_{1, t-3}  
+  \end{bmatrix} 
+  \left( y_{1, t} - \alpha_{1,1} + \rho_{1,1} y_{1, t-1} + \rho_{1,2} y_{1, t-2} + \rho_{1,3} y_{1, t-3} \right)
+  \\
+  \begin{bmatrix} 
+  y_{2, t-1} & y_{2, t-2}   
+  \end{bmatrix} 
+  \left( y_{2, t} - \alpha_{2,1} + \rho_{2,1} y_{2, t-1} + \rho_{2,2} y_{2, t-2} \right)
+\end{bmatrix}
+\end{align}
+$$
+where the expectation is among observations (t). 
+There are $K1$ instruments for the first equation and $K2$ for the second. The above moment conditions in matrix form are
+
+$$
+\underbrace{\mathbf{f}}_{(K_1+K_2 \times 1)} =
+\begin{equation}
+\left( \frac{1}{n} \right)
+\underbrace{\begin{bmatrix}
+Z_{1}^{\prime}    & 0    \\
+0    & Z_{2}^{\prime}    \\
+\end{bmatrix}}_{((K1+K2) \times 2T)}
+\begin{bmatrix}
+\mathbf{u_{1}} \\
+\mathbf{u_{2}} 
+\end{bmatrix}_{(2T \times 1)}
+\end{equation}
+$$
+
+with,
+
+$$
+\begin{align}
+Z_{1} = 
+\begin{bmatrix}
+z^{(k1)}_{1,t}    &   z^{(k2)}_{1,t}    &   z^{(k3)}_{1,t}    &   \cdots & z^{(K1)}_{1,t}   \\   
+z^{(k1)}_{1,t+1}    &   z^{(k2)}_{1,t+1}    &   z^{(k3)}_{1,t+1}    &   \cdots & z^{(K1)}_{1,t+1}   \\
+\vdots    &   \vdots    &   \vdots      &     \cdots    &   \vdots \\
+z^{(k1)}_{1,T}    &   z^{(k2)}_{1,T}    &   z^{(k3)}_{1,T}    &   \cdots & z^{(K1)}_{1,T}   \\
+\end{bmatrix}_{(T \times K1)} 
+&
+Z_{2} = 
+\begin{bmatrix}
+z^{(k1)}_{2,t}    &   z^{(k2)}_{2,t}    &   z^{(k3)}_{2,t}    &   \cdots & z^{(K2)}_{2,t}   \\   
+z^{(k1)}_{2,t+1}    &   z^{(k2)}_{2,t+1}    &   z^{(k3)}_{2,t+1}    &   \cdots & z^{(K2)}_{2,t+1}   \\
+\vdots    &   \vdots    &   \vdots      &     \cdots    &   \vdots \\
+z^{(k1)}_{2,T}    &   z^{(k2)}_{2,T}    &   z^{(k3)}_{2,T}    &   \cdots & z^{(K2)}_{2,T}   \\
+\end{bmatrix}_{(T \times K1)} \\
+\end{align}
+$$
+
+### Build objects
+
+```{r}
+# Y %*% B
+# Get the vector b
+get_b <- function(theta0) {
+  matrix(c(1, theta0['rho11'], theta0['rho12'], theta0['rho13'], 
+                1, theta0['rho21'], theta0['rho22']), nrow=7, ncol=1)
+
+}
+
+get_deriv_B <- function(theta0) {
+              DerivB <- rbind(c(0, 0, 0),
+                          c(-1, 0, 0),
+                          c(theta0['phiPi'], -(1-theta0['rhoR']), 0),
+                          c(theta0['phiX'], 0, -(1-theta0['rhoR'])))
+              colnames(DerivB) <- c('dfWRTrhoR', 'dfWRTphiPi', 'dfWRTphiX')
+              
+              DerivB
+              
+}
+
+
+```
+There are
+
+```{r}
+Y1 <- cbind(y1[4:NROW(y1)], y1[3:(NROW(y1)-1)], y1[2:(NROW(y1)-2)], y1[1:(NROW(y1)-3)])
+head(Y1)
+Y2 <- cbind(y1[4:NROW(y1)], y1[3:(NROW(y1)-1)], y1[2:(NROW(y1)-2)])
+head(Y2)
+NROW(Y2)
+T = NROW(Y1)
+Y <- rbind(cbind(Y1, matrix(0, nrow=NROW(Y2), ncol=NCOL(Y2))),
+            cbind(matrix(0, nrow=NROW(Y1), ncol=NCOL(Y1)), Y2))
+head(Y)
+
+```
+
+
+```{r }
+Z1 <- cbind(dplyr::lag(y1, 1), dplyr::lag(y1, 2), dplyr::lag(y1, 3)) %>%
+  .[-(1:3), ]
+Z2 <- cbind(dplyr::lag(y1, 1), dplyr::lag(y1, 2)) %>%
+  .[-(1:3), ]
+T = NROW(Z1)
+KZ1 = NCOL(Z1)
+KZ2 = NCOL(Z2)
+
+Z <- rbind(cbind(Z1, matrix(0, nrow=NROW(Z1), ncol=NCOL(Z2))),
+            cbind(matrix(0, nrow=NROW(Z2), ncol=NCOL(Z1)), Z2))
+NCOL(Z) == KZ1 + KZ2
+NROW(Z) == 2*T
+
+```
+
+```{r X, eval=FALSE, include=FALSE}
+X1 = rep(1, times=T) 
+X2 = rep(1, times=T)
+X <- rbind(cbind(X1, matrix(0, nrow=NROW(X1), ncol=NCOL(X1))),
+            cbind(matrix(0, nrow=NROW(X1), ncol=NCOL(X2)), X2))
+
+```
+
+```{r search_settings}
+NCORES = 1
+STEPSPERCORE = 20
+# Size of adjacent cells to explores is NCORES * STEPSPERCORE
+
+NEQUATIONS = 2
+
+PARAMS_CFG <- tribble(~name, ~iniVal, ~stepSize, ~minVal, ~maxVal,
+                      'rho11',  NA, 0.05, -1, 1,
+                      'rho12',  NA, 0.05, -1, 1,
+                      'rho13',  NA, 0.05, -1, 1,
+                      'rho21',  NA, 0.05, -1, 1,
+                      'rho22',  NA, 0.05, -1, 1)  %>%
+              mutate('N_TICKS' = ((maxVal-minVal)/stepSize)+1)
+
+
+# Initial value
+PARAMS_CFG$iniVal <- c('rho11' = 0.1, 'rho12' = 0.2, 'rho13' = 0.3,
+            'rho21'= 0.01, 'rho22'=0.02)
+
+  
+#  as.data.frame(sam$Y) %>%
+#  lm(R ~ 1 + R_tM1 + pi + x, data=.) %>%
+#  .$coefficients %>%
+#  {c('rhoR' = .[['R_tM1']], 
+#     'phiPi' = .[['pi']],
+#     'phiX' = .[['x']])}
+  
+# call efisegri
+source(paste0(PATHROOT,'Codes/efisegri/efisegri_ND_fcns.R'))
+
+
+```
+
+
+#### Stage 1: find minimum
+
+```{r debug}
+alpha1 = 0.5
+alpha2 = -0.7
+rho11 = 0.15
+rho12 = -0.10
+rho13 = 0.3
+rho21 = -0.45
+rho22= 0.15
+
+theta0 <- c('rho11' = 0.15, 'rho12' = -0.1, 'rho13' = 0.3,
+            'rho21'= -0.45, 'rho22'=0.15)
+comp_S(theta0)
+
+sam <- tibble('y1_t' = y1,
+              'y1_tM1' = lag(y1, n=1),
+              'y1_tM2' = lag(y1, n=2),
+              'y1_tM3' = lag(y1, n=3),
+              'y2_t' = y2,
+              'y2_tM1' = lag(y2, n=1),
+              'y2_tM2' = lag(y2, n=2)) %>%
+  {.[-(1:3), ]}
+
+lm(y1_t ~ y1_tM1 + y1_tM2 + y1_tM3,
+   data=sam) %>%
+  summary()
+
+lm(y2_t ~ y2_tM1 + y2_tM2,
+   data=sam)
+
+```
+
+```{r Search, cache=TRUE}
+# Find minimum and rotate initial value if needed it
+# Standard IV objects
+# Minimums S fcn (GMM minimand)
+minsS <- list('NelderMead' = NA)
+              #'LBFGSB' = NA)
+# 2-step GMM closed-form solution
+#minsS$Closed <- first_Stage(method='Closed', SIV=stdIVobjs, WTlags = NULL)
+minsS$NelderMead <- first_Stage(method='NelderMead')
+#minsS$LBFGSB <- first_Stage(method='LBFGSB', gr_T = comp_grad)
+
+fstRes <- map2_dfr(minsS, names(minsS), 
+                   function(minS, methodName) {
+  list2env(minS, envir=environment())
+  tibble('method' = methodName, 
+         'rhoR' = par['rhoR'],
+         'phiPi' = par['phiPi'],
+         'phiX' = par['phiX'],
+         'value' = value,
+         'convergence' = convergence,
+         'tSeconds' = tSeconds,
+         'counts.function' = counts['function'],
+         'counts.gradient' = counts['gradient'],
+         'message' = message)
+})
+
+fstRes %>% 
+        DT::datatable(filter='top',
+                      options=list('scrollX'=TRUE))
+
+```

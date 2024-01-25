@@ -1,0 +1,216 @@
+---
+title: "AR1_1mom"
+output: html_document
+date: '2022-08-01'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+SAMID = 'preVolcker_z2_EfiTest'
+knitr::opts_chunk$set(echo = TRUE) # Whether to display the source code in the output document. 
+PATHROOT <- 'C:/Users/22457561/OneDrive/UWA PhD/Fiscal_Monetary_Interaction/'
+tryCatch({setwd(PATHROOT)},
+         error = function(cond) { 
+           PATHROOT <<- 'C:/Users/a1230166/OneDrive/UWA PhD/Fiscal_Monetary_Interaction/'
+           setwd(PATHROOT)})
+OUTFOLDER <- 'Results/'
+
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(future)
+library(furrr)
+library(purrr)
+library(sandwich) # HAC variance estimator
+library(MTS)
+library(DT)
+library(plotly)
+library(profvis)
+library(tictoc)
+# Plotting
+library(gridExtra) # tableGrob
+library(latex2exp) # TeX
+source(str_c(PATHROOT, 'Codes/FunsMisc.R'))
+source(str_c(PATHROOT, 'Codes/efisegri/sim_funs.R'))
+```
+
+## SIMULATION
+
+
+
+```{r}
+bigT = 1005
+set.seed(12345)
+u_ <- sim_ARCH1('u0'=0.2, 'u1'=0.6, 'T'=bigT)
+y_ <- sim_AR3_hetero('alpha'=-0.25, 'rho1'=0.4, 'rho2'=0, 'rho3'=0, bigT, u_)[-(1:5)]
+
+# Fit an AR1 in the mean and ARCH(1) in variance
+#fGarch::garchFit(formula = ~arma(1,0)+garch(1,0), data=y_)
+# Results from garchFit
+##omega - the constant coefficient of the variance equation, by default 1e-6;
+##alpha - the value or vector of autoregressive coefficients, by default 0.1, specifying a model #of order 1;
+##beta - the value or vector of variance coefficients, by default 0.8, specifying a
+#model of order 1;
+##The optional values for the linear part are:
+#mu - the mean value, by default 0;
+#ar - the autoregressive ARMA coefficients, by default 0;
+#ma - the moving average ARMA coefficients, by default 0
+
+```
+
+## ESTIMATION
+
+## 2 moment equations, with nuisance parameter
+### Moment conditions
+
+
+$$
+\begin{align}
+\mathbb{E}\left[ (y_{t}- \color{cyan}{c_{1}} - \color{blue}{\rho} y_{t-1} ) y_{t-1}\right] &= 0 \\
+\mathbb{E} \left[ ( u_{t}^{2} - \color{cyan}{c_2}- \color{blue}{\gamma} u_{t-1}^{2} ) \mathbf{z}_{t} \right] &= 0
+\end{align}
+$$
+
+where $u_t = (y_t - \color{blue}{\rho} y_{t-1})$ and $y_{t-1}$ is the instrument ($z^{(1)}_{t}$). The first equation is the orthoganality condition for the conditional mean whereas the second equation is the orthoganlity condition for the forecasting error in the conditional variance: the forecasting error of the conditional variance should have a mean zero and being uncorrelated with previous values. 
+
+$$
+\mathbf{z}^{(2)}_{t} = 
+\begin{bmatrix}
+(y_{t-1} - \color{blue}{\rho} y_{t-2})^2
+\end{bmatrix}
+$$
+
+### Manual moment functions
+```{r}
+# Moment conditions
+
+theta0 <- c('rho1'=0.4, 'gamma'=0.6)
+c1 = -0.25
+Y1 <- cbind('y_t'= y_, 'y_tMinus1' = dplyr::lag(y_, n=1))[-(1), ]
+u <- (Y1 %*% c(1, -theta0['rho1'])) - c1
+#mean(u)
+
+
+z1 <- cbind(1, Y1[, 'y_tMinus1'])
+T = NROW(u)
+
+FT1 <- (1/T)*t(z1) %*% u 
+
+
+Y2 <-  cbind('uSq_t' = as.vector(u^2), 
+             'uSq_tMinus1' = (as.vector(dplyr::lag(u, n = 1)))^2)[-(1), ]
+c2 = 0.20
+varUhat <- (Y2 %*% c(1, -theta0['gamma'])) - c2
+#mean(varUhat)
+
+z2 <- cbind(1, Y2[, 'uSq_tMinus1'])
+
+FT2 <- (1/T)*t(z2) %*% varUhat
+
+FT1
+FT2
+
+FT <- rbind(FT1,
+      FT2)
+
+(t(FT) %*% FT)
+
+
+```
+
+### Computing instruments and residuals
+```{r}
+this_uHat_fcn <- function(theta0, 
+                          y_=y_, c1=-0.25, c2=0.20){
+  Y1 <- cbind(y_, dplyr::lag(y_, n=1))[-(1), ]
+  uMean <- {Y1 %*% c(1, -theta0['rho1']) - c1} %>%
+            .[,1]
+  
+  Y2 <- (cbind(uMean, dplyr::lag(uMean, n = 1))[-(1), ])^2
+  uVar <- {Y2 %*% c(1, -theta0['gamma']) - c2} %>%
+        .[ , 1]
+  
+  Y <- rbind(cbind(Y1[-(1), ], matrix(0, nrow=NROW(Y2), ncol=NCOL(Y1))),
+            cbind(matrix(0, nrow=NROW(Y2), ncol=NCOL(Y2)), Y2))
+  
+  uHat <- c(uMean[-(1)], # you lose another obs to compute lag of uMean_t
+                uVar)
+  # Instruments
+  Z1 <- cbind(1, lag(y_, n=1))[-(1:2), ]
+  Z2 <- cbind(1, lag(uMean^2, n=1))[-(1), ]
+  
+  Z <- rbind(cbind(Z1, matrix(0, nrow=NROW(Z1), ncol=NCOL(Z2))),
+            cbind(matrix(0, nrow=NROW(Z2), ncol=NCOL(Z1)), Z2))
+  NCOL(Z) == NCOL(Z1) + NCOL(Z2)
+  
+  list('Y'=Y, 'uHat'=uHat, 'Z'=Z)
+
+
+}
+
+# Returns a vector
+get_b <- function(theta0) {
+  matrix(c(1, 
+           -theta0['rho1'],
+           1,
+           -theta0['gamma']),
+         ncol=1)[,1]
+
+}
+
+```
+
+### Set up initial objects
+
+```{r}
+T = NROW(y_) - 2
+NEQUATIONS = 2
+#X1 = rep(1, times=T) # thisis redudndant since im fixing c1
+#X2 = rep(1, times=T)
+#X <- rbind(cbind(X1, matrix(0, nrow=NROW(X1), ncol=NCOL(X1))),
+#            cbind(matrix(0, nrow=NROW(X1), ncol=NCOL(X2)), X2))
+
+
+
+NCORES = 1
+STEPSPERCORE = 20
+# Size of adjacent cells to explores is NCORES * STEPSPERCORE
+
+PARAMS_CFG <- tribble(~name, ~iniVal, ~stepSize, ~minVal, ~maxVal,
+                      'rho1',  0.5, 0.05, -1, 1,
+                      'gamma',  0.9, 0.05, -1, 1)  %>%
+              mutate('N_TICKS' = ((maxVal-minVal)/stepSize)+1)
+
+theta0 <- c('rho1'=0.4, 'gamma'=0.5)
+objs <- this_uHat_fcn(y_=y_, c1=-0.25, theta0=theta0)
+Y <- objs$Y
+#Yb <-  objs$Y %*% get_b(theta0)
+Z <- objs$Z
+uHat <- objs$uHat
+
+# call efisegri
+source(paste0(PATHROOT,'Codes/efisegri/efisegri_ND_fcns.R'))
+
+
+
+```
+
+### Search: first-stage
+```{r}
+thetaIni <- matrix(PARAMS_CFG$iniVal, ncol=1,
+                     dimnames=list(PARAMS_CFG$name))[,1]
+comp_S(THETA0=thetaIni, DATA=y_, UHAT_FCN=this_uHat_fcn)
+#comp_S(c('beta1' = -0.51))
+#comp_tests(c('beta1' = 0.5), NULL, Y,
+#          Z, Ztrans, T, get_b)
+minsS <- list('NelderMead' = NA)
+              #'LBFGSB' = NA)
+# 2-step GMM closed-form solution
+#minsS$Closed <- first_Stage(method='Closed', SIV=stdIVobjs, WTlags = NULL)
+minsS$NelderMead <- first_Stage(method='NelderMead', data=y_, uHat_fcn=this_uHat_fcn)
+#m
+```
+
+
+
