@@ -1,5 +1,6 @@
 ## FUNCTIONS -----
-
+library(data.table)
+library(future.apply)
 
 ### Grid ----
 # OUTPUTS: a data.table with the grid of a 3 dimensional parameter space. The order of columns is based on the # of steps that each parameter requires such that the parameter with longest steps is last. The data.table keys are the parameter values.
@@ -24,7 +25,7 @@ build_grid_p23 <- function(PARAMS_CFG,
     arrange(., N_TICKS)
   lines <- pmap(Ticks, function(...) {
     thisParam <- tibble(...)
-    origin <- round(thisParam$INIVAL_STAGE2, digits=WANTPRECISION[thisParam$name])
+    origin <- round(thisParam$iniVal, digits=thisParam$precision)
     
     #if (startValue=='automatic') {
     #  startValue = 0-nJumps*thisParam$stepSize  
@@ -39,7 +40,7 @@ build_grid_p23 <- function(PARAMS_CFG,
     endValue = origin + floor((thisParam$maxVal-origin)/thisParam$stepSize)*thisParam$stepSize
     
     {seq(from=startValue, to=endValue, by=thisParam$stepSize)} %>%
-      round(., digits=WANTPRECISION[thisParam$name])
+      round(., digits=thisParam$precision)
     
   })
   names(lines) = PARAMS_CFG$name
@@ -621,7 +622,87 @@ comp_tests <- function(THETA0, VffLags=NULL) {
             'c2_hat' = c2_hat)
   # Note that c2_hat is a vector, that is why we combine it with other scalars using c()
 }
+# Compute the only the qLL-Stability part for a given theta0.
+# Output a scalar with the qLLStab statistic
+# INPUT: theta0: a named vector with the parameter values under the null
+#        T: a integer with the size of the sample (this avoid recomputing on each iteration)
+#        GET_B: a function which inputs the vector theta0 and outputs the value of the vector b(theta0) such that Y%*%b is the moment equation. 
+# It requires from the global environment the following objects:
+# STCEQS, Y, Z, T, GET_B, Mx, R
+comp_qLLStab <- function(THETA0, typeVarF, VffLags=NULL) {
+  #THETA0 = Grid[1, c('alpha'=alpha, 'beta'=beta, 'chi'=chi)]
+  #typeVarF = 'const'
+  
+  # Compute moment function
+  b <- GET_B(THETA0)
+  Yb = Y %*% b # this is the moment fcn
+  # a GT x 1 vector
+  
+  # fT is a T x (k1+k2+...+kG) matrix where G is the total number of instruments for all equations
+  # TODO: optimize this for NEQS equations
+  fT = Yb
+  FT = apply(X=fT, MARGIN=2, FUN=sum)
+  #	Variance of f_t
+  if (typeVarF == 'HAC')
+  {
+    Vff = lm(fT ~ 1) %>%
+      sandwich::vcovHAC(., sandwich=FALSE, adjust=TRUE)
+  }
+  if (typeVarF == 'HC3' || typeVarF=='const')
+  {
+    Vff <- lm(fT ~ 1) %>% 
+      sandwich::vcovHC(., type=typeVarF, sandwich=FALSE)
+  }
+  if (typeVarF == 'NeweyWest')
+  {
+    Vff <- lm(fT ~ 1) %>%
+      # Matlab code uses lag=3. If you use lag=NULL it is automatically selected. Alternatively use kernHAC().
+      sandwich::NeweyWest(., lag=VffLags, prewhite=FALSE, sandwich = FALSE)
+  }
+  # Impose the restrictions (if any)
+  Vff <- RS * Vff  # elemet-by-element multiplication
+  if (is_scalar_vector(Vff)) {
+    VffInvSqrt = (1/sqrt(Vff))
+  } else {
+    # One-stage estimator
+    VffInvSqrt = mtx_inv_sqrt(Vff)
+  }
 
+  ### qLL-Stab (qllStilde) ----
+  # Magnusson Mavroeidis 2014, Appendix p17
+  # Standarside moments (F hat in the Appendix)
+  Fstd_hat = fT %*% VffInvSqrt
+  # H_hat
+  DeltafT  <- rbind(Fstd_hat[1, ], 
+                    base::diff(Fstd_hat, differences=1))
+  r_T = cumprod(r * rep(1, times=T)) # (T x kz)
+  R = c(1, r_T[1:(T-1)]) %>%
+    toeplitz(.) %>%
+    {. * (lower.tri(., diag = TRUE))}
+  H_hat = R %*% DeltafT # T x kz
+  # G_hat
+  r_Ttrans = t(r_T)
+  # T x T
+  M_rT <- diag(T) - r_T %*% solve(r_Ttrans %*% r_T ) %*% r_Ttrans
+  # T x kz
+  G_hat = M_rT %*% H_hat
+  
+  # TSSR_Ghat
+  # For each column (instrument) sum the square of observations. 
+  # Then, sum over columns (instruments)
+  TSSR_Ghat = G_hat^2 %>%
+    apply( ., MARGIN=2, FUN=sum) %>%
+    sum(.)
+  # TSSR_Nhat
+  # N_hat (T x kz)
+  N_hat = M_ones_T %*% Fstd_hat
+  TSSR_Nhat = N_hat^2 %>%
+    apply( ., MARGIN=2, FUN=sum) %>%
+    sum(.)
+  
+  c('qLLStab' = TSSR_Nhat - r * TSSR_Ghat)
+  
+}
 
 # get_deriv_B: a function that inputs the current value of theta (theta0) and output a the matrix derivative of b(theta). b(theta) is a row (r x 1) vector and theta is a (p x 1) vector. 
 # The derivative of b(theta) with respect to theta is a (r x p) matrix where each element is the derivative of the element r_i in b(theta) with respect to the element p_i in theta.
