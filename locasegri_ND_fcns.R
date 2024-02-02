@@ -1,6 +1,8 @@
+# Run locasegri_ini.R first!
+# It loads the necesary libraries.
+
 ## FUNCTIONS -----
-library(data.table)
-library(future.apply)
+
 
 ### Grid ----
 # OUTPUTS: a data.table with the grid of a 3 dimensional parameter space. The order of columns is based on the # of steps that each parameter requires such that the parameter with longest steps is last. The data.table keys are the parameter values.
@@ -700,7 +702,11 @@ comp_qLLStab <- function(THETA0, typeVarF, VffLags=NULL) {
     apply( ., MARGIN=2, FUN=sum) %>%
     sum(.)
   
-  c('qLLStab' = TSSR_Nhat - r * TSSR_Ghat)
+  # the S 
+  S_T <- mean(fT) * VffInvSqrt * mean(fT)
+  
+  c('qLLStab' = TSSR_Nhat - r * TSSR_Ghat,
+    'S' = S_T)
   
 }
 

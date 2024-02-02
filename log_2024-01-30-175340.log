@@ -1,0 +1,22 @@
+=========================================================================
+Log Path: log_2024-01-30-175340.log
+Program Path: C:/Users/Emi/OneDrive/UWA PhD/MonPolicy
+StockMkt/Code/locasegri/locasegri_ini.R
+Working Directory: C:/Users/Emi/OneDrive/UWA PhD/MonPolicy
+StockMkt/Code/locasegri
+User Name: Emi
+R Version: 4.3.2 (2023-10-31 ucrt)
+Machine: DAUD8370BRF x86-64
+Operating System: Windows 10 x64 build 19045
+Base Packages: stats graphics grDevices utils datasets methods base Other
+Packages: future.apply_1.11.0 data.table_1.14.8 dplyr_1.1.3 stringr_1.5.0
+zoo_1.8-12 lubridate_1.9.3 tibble_3.2.1 furrr_0.3.1 future_1.33.0 purrr_1.0.2
+tseries_0.10-55 tictoc_1.2 logr_1.3.4 readxl_1.4.3
+Log Start Time: 2024-01-30 17:53:40.586072
+=========================================================================
+
+Log initialized. RESULTID is 3EQS.1519
+
+NOTE: Log Print Time:  2024-01-30 17:53:40.58944
+NOTE: Elapsed Time: 0.00136518478393555 secs
+
